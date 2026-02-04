@@ -1,0 +1,2098 @@
+#+TITLE: git-highlights v0.1 — Go Learning Build Plan
+#+AUTHOR: Learning Path
+#+DATE: 2026-02-03
+
+* Overview
+Building =git-highlights= v0.1 as a Go learning project — a CLI tool that generates weekly engineering highlights from Git/GitHub data.
+
+** What You'll Learn
+- Go project structure with =cmd/= and =internal/=
+- Executing external commands: =os/exec= package
+- JSON parsing from command output
+- Date/time manipulation with =time= package
+- Text templating with =text/template=
+- CLI frameworks: =cobra= library
+- File I/O and markdown generation
+- Working with Git and GitHub CLI
+- Table-driven testing with real data
+- Building cross-platform binaries
+
+** Success Criteria
+- [ ] Can run =git-highlights generate= and get weekly highlights
+- [ ] Understand how to shell out to =git= and =gh= commands
+- [ ] Can parse JSON, filter data, and generate markdown
+- [ ] Have a working test suite with fixtures
+- [ ] Feel confident building CLI tools in Go
+
+** Why This Project?
+- **Practical**: Solves a real problem (guild meeting prep)
+- **Real-world**: Works with actual Git repos and GitHub data
+- **Progressive**: Starts simple, adds complexity gradually
+- **Useful**: You'll actually use this tool weekly
+
+* How It Works
+This section explains the high-level architecture before you start building.
+
+** External Dependencies
+The tool relies on two CLI tools that must be installed:
+
+1. **git** — For accessing commit history
+   - Standard tool, already installed on dev machines
+   - We use: =git log= to get merged commits
+
+2. **gh** (GitHub CLI) — For accessing PR data
+   - Install: =brew install gh= (macOS) or =apt install gh= (Linux)
+   - Authenticate: =gh auth login=
+   - We use: =gh pr list= to get PR details with JSON output
+
+** Why CLI Tools Instead of APIs?
+
+You might wonder: "Why not use the Git/GitHub APIs directly?"
+
+**Good question!** Here's why we shell out to CLI tools:
+
+*** Advantages of Using CLI Tools
+- **Authentication handled**: =gh= manages OAuth tokens for you
+- **Simpler code**: No HTTP client, no pagination logic
+- **Fewer dependencies**: No need for GitHub SDK
+- **Same result**: =gh pr list --json= gives us JSON anyway
+- **Familiar tools**: Use what developers already have
+
+*** When You'd Use APIs Directly
+- Building a web service (can't shell out from a server easily)
+- Need real-time updates (webhooks, streaming)
+- Very high performance requirements (avoid process overhead)
+- Complex API interactions beyond what CLI exposes
+
+For a CLI tool like this, shelling out is **the right choice**.
+
+** Data Flow
+
+Here's what happens when you run =git-highlights generate=:
+
+#+begin_example
+1. Calculate date range (7 days ago → today)
+   ↓
+2. Execute: git log main --since="YYYY-MM-DD"
+   ↓
+3. Parse git output → Extract commits, authors, PR numbers
+   ↓
+4. Execute: gh pr list --state merged --json ... --search "merged:>=YYYY-MM-DD"
+   ↓
+5. Parse JSON → Get PR details (title, author, size, labels)
+   ↓
+6. Filter PRs → Apply highlight detection rules
+   ↓
+7. Group by team → Extract ticket prefix (BLO, AIW, DA, etc.)
+   ↓
+8. Calculate stats → Contributors, team counts, totals
+   ↓
+9. Generate markdown → Use text/template
+   ↓
+10. Output → Print to stdout + save to docs/highlights/YYYY-MM-DD.md
+#+end_example
+
+** Package Responsibilities
+
+The code is organized into logical packages:
+
+*** =cmd/git-highlights/=
+Main application entry point.
+- =main.go= — Root command, CLI setup
+- =generate.go= — Generate command implementation
+- =version.go= — Version command
+
+*** =internal/git/=
+Git operations.
+- =GetMergedCommits()= — Shell out to =git log=
+- =ParseCommit()= — Parse git log output
+- =ExtractPRNumber()= — Extract PR # from commit message
+
+*** =internal/github/=
+GitHub data fetching.
+- =GetMergedPRs()= — Shell out to =gh pr list=
+- =PR= struct — Represents a pull request
+- =TotalLines()= — Calculate PR size
+- =HasLabel()= — Check for labels
+
+*** =internal/highlight/=
+Business logic for highlight detection.
+- =IsHighlight()= — Determine if PR should be highlighted
+- =ShouldExclude()= — Filter out noise (small PRs, chores)
+- =ExtractTeamPrefix()= — Parse ticket prefix from title
+- =GroupByTeam()= — Organize PRs by team
+
+*** =internal/markdown/=
+Output generation.
+- =Generate()= — Create markdown from template
+- =ReportData= struct — All data for the report
+- Team name/emoji mappings
+
+** Example Commands
+
+*** What Git Command Gets Executed
+#+begin_src bash
+git log main --since="2026-01-27" --pretty=format:"%H|%aN|%s"
+#+end_src
+
+**Output:**
+#+begin_example
+abc123|John Doe|BLO-645: Update feature (#5731)
+def456|Jane Smith|AIW-123: Add AI feature (#5707)
+#+end_example
+
+*** What GitHub Command Gets Executed
+#+begin_src bash
+gh pr list \
+  --state merged \
+  --limit 100 \
+  --json number,title,author,mergedAt,labels,additions,deletions,body \
+  --search "merged:>=2026-01-27"
+#+end_src
+
+**Output:**
+#+begin_src json
+[
+  {
+    "number": 5731,
+    "title": "BLO-645: Update feature",
+    "author": {"login": "johndoe"},
+    "mergedAt": "2026-02-03T18:59:34Z",
+    "additions": 88,
+    "deletions": 34,
+    "labels": [{"name": "feature"}],
+    "body": "Description of the PR..."
+  }
+]
+#+end_src
+
+** Highlight Detection Logic
+
+PRs are highlighted if **any** of these conditions are true:
+
+1. **Large PR**: 150+ lines changed
+2. **Important labels**: Has "feature", "breaking", or "security" label
+3. **Keywords in title**: Contains "new", "add feature", "breaking"
+
+PRs are excluded if:
+
+1. **Too small**: Less than 20 lines
+2. **Chore/deps/test**: Title starts with "chore:", "deps:", "test:", "docs:" (unless has special labels)
+
+** Team Grouping
+
+Teams are identified by ticket prefix in the PR title:
+
+#+begin_example
+"BLO-645: Update feature"  → BLO (Blocks)
+"AIW-123: Add AI"          → AIW (AI)
+"DA-456: Fix endpoint"     → DA (Data)
+"No prefix here"           → OTHER
+#+end_example
+
+Each team gets an emoji and full name:
+- BLO → 🧱 Blocks
+- AIW → 🤖 AI
+- DA → 📊 Data
+- BPP → 💰 Billing
+- INB → 📥 Inbox
+
+** Final Output
+
+The tool generates a markdown file like this:
+
+#+begin_example
+# Weekly Highlights: 2026-01-27 - 2026-02-03
+
+*61 PRs merged by 16 contributors this week*
+
+---
+
+## 🌟 Highlights
+
+### 🤖 AI (AIW)
+
+**AIW-2089: Simulate Beacon AI Answers Responses** by justindaiello
+Adds simulation capabilities for testing Beacon AI Answers.
+[View PR #5677](https://github.com/helpscout/hs-app-ui/pull/5677) • 1,803 lines
+
+---
+
+## 📊 Stats
+
+**Merges by Team:**
+- 📥 INB (Inbox): 15 PRs
+- 🤖 AIW (AI): 9 PRs
+
+**Top Contributors:**
+1. deivamagalhaes - 9 PRs
+2. tiuscia - 8 PRs
+
+**Change Volume:**
+- Total: 35,240 additions, 21,218 deletions
+- Average PR size: 925 lines
+#+end_example
+
+** Architecture Decisions
+
+*** Why =os/exec= Instead of Libraries?
+- Git has no Go library (there's go-git, but it's complex)
+- =gh= CLI is simpler than using GitHub API SDK
+- Teaches you an important Go pattern (shelling out)
+
+*** Why =text/template= for Output?
+- Standard library (no dependencies)
+- Perfect for markdown generation
+- Easy to test and modify
+- Can switch to =html/template= later for HTML output
+
+*** Why Cobra for CLI?
+- Industry standard (kubectl, gh, hugo all use it)
+- Auto-generates help text
+- Easy subcommands and flags
+- Better than raw =flag= package
+
+** Generic from the Start
+
+This tool is designed to **work with any GitHub repository**, not just Help Scout's:
+- ✅ Auto-detects repo URL from =git remote=
+- ✅ Works in any git repo with GitHub PRs
+- ✅ Team mappings are easily customizable (v0.2 will add config file)
+
+** Now You're Ready!
+
+With this mental model, the implementation phases will make sense. You understand:
+- ✅ What external tools we use (git, gh)
+- ✅ Why we use them (simplicity, authentication)
+- ✅ How data flows through the system
+- ✅ What each package does
+- ✅ How the final output looks
+- ✅ Why it works with any repo (not just Help Scout!)
+
+Let's build it!
+
+* Phase 1: Project Setup & Hello World
+** STEP 1: Initialize Project Structure
+*** Tasks
+- [ ] Create project directory: =mkdir -p ~/Gigalope/git-highlights=
+- [ ] =cd ~/Gigalope/git-highlights=
+- [ ] Initialize module: =go mod init github.com/YOURUSERNAME/git-highlights=
+- [ ] Create directory structure:
+#+begin_src bash
+mkdir -p cmd/git-highlights
+mkdir -p internal/{git,github,highlight,markdown}
+#+end_src
+
+*** Go Concepts
+- =cmd/= directory — convention for main applications
+- =internal/= directory — private packages not importable by external projects
+- Module naming with GitHub path
+
+*** Checkpoint
+- [ ] =go.mod= exists
+- [ ] Directory structure matches above
+
+** STEP 2: Create Hello World with Cobra
+*** Tasks
+Install Cobra:
+#+begin_src bash
+go get -u github.com/spf13/cobra@latest
+#+end_src
+
+Create =cmd/git-highlights/main.go=:
+#+begin_src go
+package main
+
+import (
+    "fmt"
+    "os"
+
+    "github.com/spf13/cobra"
+)
+
+var rootCmd = &cobra.Command{
+    Use:   "git-highlights",
+    Short: "Generate weekly engineering highlights from Git/GitHub",
+    Long: `git-highlights analyzes merged PRs and generates
+meeting-ready markdown summaries of the week's work.`,
+}
+
+func main() {
+    if err := rootCmd.Execute(); err != nil {
+        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+        os.Exit(1)
+    }
+}
+#+end_src
+
+Create =cmd/git-highlights/generate.go=:
+#+begin_src go
+package main
+
+import (
+    "fmt"
+
+    "github.com/spf13/cobra"
+)
+
+var generateCmd = &cobra.Command{
+    Use:   "generate",
+    Short: "Generate highlights for the past week",
+    RunE: func(cmd *cobra.Command, args []string) error {
+        fmt.Println("Generating highlights...")
+        return nil
+    },
+}
+
+func init() {
+    rootCmd.AddCommand(generateCmd)
+}
+#+end_src
+
+*** Go Concepts to Learn
+- =init()= function — runs before =main()=
+- Cobra command structure: =Use=, =Short=, =Long=, =RunE=
+- Command composition with =AddCommand()=
+- =RunE= vs =Run= — error-returning vs non-error
+- Pointer to =cobra.Command= struct
+
+*** Checkpoint
+- [ ] Run: =go mod tidy=
+- [ ] Build: =go build -o git-highlights ./cmd/git-highlights=
+- [ ] Test: =./git-highlights= (see help)
+- [ ] Test: =./git-highlights generate= (see "Generating...")
+
+* Phase 2: Execute Git Commands
+** STEP 3: Create Git Package
+*** Tasks
+Create =internal/git/git.go=:
+#+begin_src go
+package git
+
+import (
+    "bytes"
+    "fmt"
+    "os/exec"
+    "strings"
+    "time"
+)
+
+// GetMergedCommits returns commits merged to main since the given date
+func GetMergedCommits(since time.Time) ([]string, error) {
+    sinceStr := since.Format("2006-01-02")
+
+    cmd := exec.Command("git", "log", "main",
+        "--since="+sinceStr,
+        "--pretty=format:%H|%aN|%s")
+
+    var stdout, stderr bytes.Buffer
+    cmd.Stdout = &stdout
+    cmd.Stderr = &stderr
+
+    if err := cmd.Run(); err != nil {
+        return nil, fmt.Errorf("git log failed: %w\nstderr: %s", err, stderr.String())
+    }
+
+    output := stdout.String()
+    if output == "" {
+        return []string{}, nil
+    }
+
+    lines := strings.Split(strings.TrimSpace(output), "\n")
+    return lines, nil
+}
+#+end_src
+
+*** Go Concepts to Learn
+- =os/exec= package for running external commands
+- =exec.Command()= to create command
+- =bytes.Buffer= for capturing stdout/stderr
+- Command =Stdout= and =Stderr= fields
+- =cmd.Run()= to execute and wait
+- =time.Time= and =Format()= with Go's reference date
+- =strings.Split()= and =strings.TrimSpace()=
+- Error wrapping with =%w=
+
+*** Important: Go's Date Format
+Go uses a reference date instead of format codes:
+- =2006-01-02= — the reference date (Jan 2, 2006 at 3:04:05 PM MST)
+- NOT =YYYY-MM-DD= like other languages!
+- Mnemonic: =01/02 03:04:05PM '06 -0700= (sequential digits)
+
+*** Checkpoint
+- [ ] Code compiles
+- [ ] Understand why we use =bytes.Buffer=
+- [ ] Understand Go's date format convention
+
+** STEP 4: Test Git Integration
+*** Tasks
+Create =internal/git/git_test.go=:
+#+begin_src go
+package git
+
+import (
+    "testing"
+    "time"
+)
+
+func TestGetMergedCommits(t *testing.T) {
+    // This test requires being in a git repository
+    // Skip if not in a git repo
+
+    since := time.Now().AddDate(0, 0, -7) // 7 days ago
+
+    commits, err := GetMergedCommits(since)
+    if err != nil {
+        t.Fatalf("GetMergedCommits() error = %v", err)
+    }
+
+    // We don't know how many commits, but shouldn't error
+    t.Logf("Found %d commits", len(commits))
+
+    // If there are commits, verify format
+    if len(commits) > 0 {
+        first := commits[0]
+        if !strings.Contains(first, "|") {
+            t.Errorf("commit line missing pipes: %q", first)
+        }
+    }
+}
+#+end_src
+
+*** Go Concepts to Learn
+- Integration tests vs unit tests
+- =time.AddDate()= for date arithmetic
+- =t.Logf()= for test output
+- Testing with external dependencies (git)
+
+*** Checkpoint
+- [ ] Run in your hs-app-ui directory: =go test ./internal/git -v=
+- [ ] Test passes and shows commit count
+- [ ] Understand why this is an integration test
+
+** STEP 5: Parse Commit Data
+*** Tasks
+Add to =internal/git/git.go=:
+#+begin_src go
+import "strings"
+
+// Commit represents a parsed git commit
+type Commit struct {
+    Hash    string
+    Author  string
+    Subject string
+}
+
+// ParseCommit parses a commit line from git log
+func ParseCommit(line string) (Commit, error) {
+    parts := strings.SplitN(line, "|", 3)
+    if len(parts) != 3 {
+        return Commit{}, fmt.Errorf("invalid commit line format: %q", line)
+    }
+
+    return Commit{
+        Hash:    parts[0],
+        Author:  parts[1],
+        Subject: parts[2],
+    }, nil
+}
+
+// ExtractPRNumber extracts PR number from commit subject
+// Example: "Fix bug (#1234)" -> 1234
+func ExtractPRNumber(subject string) string {
+    // Look for (#1234) pattern
+    start := strings.LastIndex(subject, "(#")
+    if start == -1 {
+        return ""
+    }
+
+    end := strings.Index(subject[start:], ")")
+    if end == -1 {
+        return ""
+    }
+
+    // Extract number between "(#" and ")"
+    prNum := subject[start+2 : start+end]
+    return prNum
+}
+#+end_src
+
+*** Go Concepts to Learn
+- =strings.SplitN()= — split with limit
+- Named return values in function signatures
+- Zero values (empty =Commit{}=)
+- String manipulation: =LastIndex=, =Index=, slicing
+
+*** Checkpoint
+- [ ] Code compiles
+- [ ] Understand string slicing syntax
+
+** STEP 6: Test Parsing
+*** Tasks
+Add to =internal/git/git_test.go=:
+#+begin_src go
+func TestParseCommit(t *testing.T) {
+    tests := []struct {
+        name    string
+        line    string
+        want    Commit
+        wantErr bool
+    }{
+        {
+            name: "valid commit",
+            line: "abc123|John Doe|Fix bug (#1234)",
+            want: Commit{
+                Hash:    "abc123",
+                Author:  "John Doe",
+                Subject: "Fix bug (#1234)",
+            },
+            wantErr: false,
+        },
+        {
+            name:    "invalid format",
+            line:    "invalid",
+            want:    Commit{},
+            wantErr: true,
+        },
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            got, err := ParseCommit(tt.line)
+            if (err != nil) != tt.wantErr {
+                t.Errorf("ParseCommit() error = %v, wantErr %v", err, tt.wantErr)
+                return
+            }
+            if got != tt.want {
+                t.Errorf("ParseCommit() = %v, want %v", got, tt.want)
+            }
+        })
+    }
+}
+
+func TestExtractPRNumber(t *testing.T) {
+    tests := []struct {
+        subject string
+        want    string
+    }{
+        {"Fix bug (#1234)", "1234"},
+        {"Add feature (#5678)", "5678"},
+        {"No PR number", ""},
+        {"Multiple (#123) and (#456)", "456"}, // Takes last
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.subject, func(t *testing.T) {
+            got := ExtractPRNumber(tt.subject)
+            if got != tt.want {
+                t.Errorf("ExtractPRNumber(%q) = %q, want %q", tt.subject, got, tt.want)
+            }
+        })
+    }
+}
+#+end_src
+
+*** Checkpoint
+- [ ] Run: =go test ./internal/git -v=
+- [ ] All tests pass
+- [ ] Add more test cases if you think of edge cases
+
+** STEP 7: Auto-Detect Repository URL
+*** Tasks
+Add to =internal/git/git.go=:
+#+begin_src go
+import (
+    "strings"
+    "regexp"
+)
+
+// GetRepoURL extracts the GitHub repository URL from git remote
+func GetRepoURL() (string, error) {
+    cmd := exec.Command("git", "remote", "get-url", "origin")
+
+    var stdout, stderr bytes.Buffer
+    cmd.Stdout = &stdout
+    cmd.Stderr = &stderr
+
+    if err := cmd.Run(); err != nil {
+        return "", fmt.Errorf("git remote failed: %w\nstderr: %s", err, stderr.String())
+    }
+
+    remoteURL := strings.TrimSpace(stdout.String())
+    return parseGitHubURL(remoteURL)
+}
+
+// parseGitHubURL converts git remote URL to GitHub web URL
+// Handles: git@github.com:user/repo.git
+//      or: https://github.com/user/repo.git
+// Returns: github.com/user/repo
+func parseGitHubURL(remoteURL string) (string, error) {
+    // Remove .git suffix
+    remoteURL = strings.TrimSuffix(remoteURL, ".git")
+
+    // Handle SSH format: git@github.com:user/repo
+    if strings.HasPrefix(remoteURL, "git@") {
+        // Extract github.com:user/repo
+        parts := strings.SplitN(remoteURL, "@", 2)
+        if len(parts) != 2 {
+            return "", fmt.Errorf("invalid SSH URL format: %s", remoteURL)
+        }
+        // Replace : with /
+        url := strings.Replace(parts[1], ":", "/", 1)
+        return url, nil
+    }
+
+    // Handle HTTPS format: https://github.com/user/repo
+    if strings.HasPrefix(remoteURL, "http") {
+        // Remove https:// or http://
+        url := regexp.MustCompile(`^https?://`).ReplaceAllString(remoteURL, "")
+        return url, nil
+    }
+
+    return "", fmt.Errorf("unrecognized git remote URL format: %s", remoteURL)
+}
+#+end_src
+
+*** Go Concepts to Learn
+- Parsing different URL formats
+- =strings.TrimSpace()= to remove whitespace
+- =strings.TrimSuffix()= to remove suffixes
+- =strings.Replace()= for string substitution
+- =regexp.MustCompile()= and =ReplaceAllString()=
+- Handling multiple input formats
+
+*** Why This Matters
+This makes the tool **work with any GitHub repository**, not just Help Scout's. No hardcoded repo URLs!
+
+*** Checkpoint
+- [ ] Code compiles
+- [ ] Understand both SSH and HTTPS git remote formats
+
+** STEP 8: Test Repository Detection
+*** Tasks
+Add to =internal/git/git_test.go=:
+#+begin_src go
+func TestParseGitHubURL(t *testing.T) {
+    tests := []struct {
+        name      string
+        remoteURL string
+        want      string
+        wantErr   bool
+    }{
+        {
+            name:      "SSH format",
+            remoteURL: "git@github.com:helpscout/hs-app-ui.git",
+            want:      "github.com/helpscout/hs-app-ui",
+            wantErr:   false,
+        },
+        {
+            name:      "HTTPS format",
+            remoteURL: "https://github.com/user/repo.git",
+            want:      "github.com/user/repo",
+            wantErr:   false,
+        },
+        {
+            name:      "HTTP format",
+            remoteURL: "http://github.com/user/repo.git",
+            want:      "github.com/user/repo",
+            wantErr:   false,
+        },
+        {
+            name:      "no .git suffix",
+            remoteURL: "https://github.com/user/repo",
+            want:      "github.com/user/repo",
+            wantErr:   false,
+        },
+        {
+            name:      "invalid format",
+            remoteURL: "not-a-url",
+            wantErr:   true,
+        },
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            got, err := parseGitHubURL(tt.remoteURL)
+            if (err != nil) != tt.wantErr {
+                t.Errorf("parseGitHubURL() error = %v, wantErr %v", err, tt.wantErr)
+                return
+            }
+            if got != tt.want {
+                t.Errorf("parseGitHubURL() = %q, want %q", got, tt.want)
+            }
+        })
+    }
+}
+
+func TestGetRepoURL(t *testing.T) {
+    // Integration test - only works in a git repo
+    if _, err := exec.Command("git", "remote", "get-url", "origin").Output(); err != nil {
+        t.Skip("not in a git repository with origin remote")
+    }
+
+    url, err := GetRepoURL()
+    if err != nil {
+        t.Fatalf("GetRepoURL() error = %v", err)
+    }
+
+    // Should contain github.com (or other git host)
+    if url == "" {
+        t.Error("GetRepoURL() returned empty string")
+    }
+
+    t.Logf("Detected repo URL: %s", url)
+}
+#+end_src
+
+*** Checkpoint
+- [ ] Run: =go test ./internal/git -v=
+- [ ] All tests pass
+- [ ] Test in your actual repo and see it detect the URL
+
+* Phase 3: GitHub CLI Integration
+** STEP 9: Create GitHub Package
+*** Tasks
+Create =internal/github/pr.go=:
+#+begin_src go
+package github
+
+import (
+    "bytes"
+    "encoding/json"
+    "fmt"
+    "os/exec"
+    "time"
+)
+
+// PR represents a GitHub pull request
+type PR struct {
+    Number    int       `json:"number"`
+    Title     string    `json:"title"`
+    Author    Author    `json:"author"`
+    MergedAt  time.Time `json:"mergedAt"`
+    Additions int       `json:"additions"`
+    Deletions int       `json:"deletions"`
+    Labels    []Label   `json:"labels"`
+    Body      string    `json:"body"`
+}
+
+// Author represents the PR author
+type Author struct {
+    Login string `json:"login"`
+}
+
+// Label represents a PR label
+type Label struct {
+    Name string `json:"name"`
+}
+
+// GetMergedPRs fetches merged PRs since the given date
+func GetMergedPRs(since time.Time) ([]PR, error) {
+    sinceStr := since.Format("2006-01-02")
+    query := fmt.Sprintf("merged:>=%s", sinceStr)
+
+    cmd := exec.Command("gh", "pr", "list",
+        "--state", "merged",
+        "--limit", "100",
+        "--json", "number,title,author,mergedAt,labels,additions,deletions,body",
+        "--search", query)
+
+    var stdout, stderr bytes.Buffer
+    cmd.Stdout = &stdout
+    cmd.Stderr = &stderr
+
+    if err := cmd.Run(); err != nil {
+        return nil, fmt.Errorf("gh pr list failed: %w\nstderr: %s", err, stderr.String())
+    }
+
+    var prs []PR
+    if err := json.Unmarshal(stdout.Bytes(), &prs); err != nil {
+        return nil, fmt.Errorf("failed to parse JSON: %w", err)
+    }
+
+    return prs, nil
+}
+#+end_src
+
+*** Go Concepts to Learn
+- =encoding/json= package
+- Struct tags: =`json:"fieldName"`=
+- Nested structs (=Author=, =Label=)
+- =json.Unmarshal()= for parsing JSON
+- Slice of structs (=[]PR=)
+- =bytes.Buffer.Bytes()= method
+
+*** Checkpoint
+- [ ] Code compiles
+- [ ] Understand how struct tags map to JSON fields
+- [ ] Know why we use =[]Label= not =[]string=
+
+** STEP 8: Calculate PR Metrics
+*** Tasks
+Add to =internal/github/pr.go=:
+#+begin_src go
+// TotalLines returns the sum of additions and deletions
+func (p PR) TotalLines() int {
+    return p.Additions + p.Deletions
+}
+
+// HasLabel checks if PR has a specific label (case-insensitive)
+func (p PR) HasLabel(name string) bool {
+    name = strings.ToLower(name)
+    for _, label := range p.Labels {
+        if strings.ToLower(label.Name) == name {
+            return true
+        }
+    }
+    return false
+}
+#+end_src
+
+*** Go Concepts to Learn
+- Methods on structs (not pointer receivers here since no mutation)
+- Value receivers vs pointer receivers
+- =strings.ToLower()= for case-insensitive comparison
+- Iterating over slices with =range=
+
+*** Checkpoint
+- [ ] Code compiles
+- [ ] Understand when to use =(p PR)= vs =(p *PR)=
+
+** STEP 9: Test GitHub Integration
+*** Tasks
+Create =internal/github/pr_test.go=:
+#+begin_src go
+package github
+
+import (
+    "testing"
+)
+
+func TestPR_TotalLines(t *testing.T) {
+    pr := PR{
+        Additions: 100,
+        Deletions: 50,
+    }
+
+    want := 150
+    got := pr.TotalLines()
+
+    if got != want {
+        t.Errorf("TotalLines() = %d, want %d", got, want)
+    }
+}
+
+func TestPR_HasLabel(t *testing.T) {
+    pr := PR{
+        Labels: []Label{
+            {Name: "feature"},
+            {Name: "Breaking"},
+        },
+    }
+
+    tests := []struct {
+        label string
+        want  bool
+    }{
+        {"feature", true},
+        {"Feature", true}, // case-insensitive
+        {"breaking", true},
+        {"bug", false},
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.label, func(t *testing.T) {
+            got := pr.HasLabel(tt.label)
+            if got != tt.want {
+                t.Errorf("HasLabel(%q) = %v, want %v", tt.label, got, tt.want)
+            }
+        })
+    }
+}
+#+end_src
+
+*** Checkpoint
+- [ ] Run: =go test ./internal/github -v=
+- [ ] Tests pass
+- [ ] Try running against real data (need to be in hs-app-ui repo):
+#+begin_src bash
+go run cmd/git-highlights/main.go # Won't work yet, but good to think about
+#+end_src
+
+* Phase 4: Highlight Detection Logic
+** STEP 10: Create Highlight Package
+*** Tasks
+Create =internal/highlight/detector.go=:
+#+begin_src go
+package highlight
+
+import (
+    "strings"
+
+    "github.com/YOURUSERNAME/git-highlights/internal/github"
+)
+
+// IsHighlight determines if a PR should be highlighted
+func IsHighlight(pr github.PR) bool {
+    // Large PR: 150+ lines
+    if pr.TotalLines() >= 150 {
+        return true
+    }
+
+    // Has important labels
+    if pr.HasLabel("feature") || pr.HasLabel("breaking") || pr.HasLabel("security") {
+        return true
+    }
+
+    // Keywords in title
+    title := strings.ToLower(pr.Title)
+    keywords := []string{"new", "add feature", "breaking", "feature:"}
+    for _, kw := range keywords {
+        if strings.Contains(title, kw) {
+            return true
+        }
+    }
+
+    return false
+}
+
+// ShouldExclude determines if a PR should be excluded
+func ShouldExclude(pr github.PR) bool {
+    // Too small
+    if pr.TotalLines() < 20 {
+        return true
+    }
+
+    // Chore/deps/test commits
+    title := strings.ToLower(pr.Title)
+    prefixes := []string{"chore:", "deps:", "test:", "docs:"}
+    for _, prefix := range prefixes {
+        if strings.HasPrefix(title, prefix) {
+            // Unless it has special labels
+            if !pr.HasLabel("security") && !pr.HasLabel("breaking") {
+                return true
+            }
+        }
+    }
+
+    return false
+}
+#+end_src
+
+*** Go Concepts to Learn
+- Package importing from your own modules
+- =strings.Contains()= and =strings.HasPrefix()=
+- Early returns for clarity
+- Slice literals: =[]string{"a", "b"}=
+
+*** Checkpoint
+- [ ] Code compiles
+- [ ] Understand the highlight logic
+
+** STEP 11: Test Highlight Detection
+*** Tasks
+Create =internal/highlight/detector_test.go=:
+#+begin_src go
+package highlight
+
+import (
+    "testing"
+
+    "github.com/YOURUSERNAME/git-highlights/internal/github"
+)
+
+func TestIsHighlight(t *testing.T) {
+    tests := []struct {
+        name string
+        pr   github.PR
+        want bool
+    }{
+        {
+            name: "large PR",
+            pr: github.PR{
+                Title:     "Normal PR",
+                Additions: 100,
+                Deletions: 60,
+            },
+            want: true,
+        },
+        {
+            name: "feature label",
+            pr: github.PR{
+                Title:     "Small feature",
+                Additions: 10,
+                Deletions: 5,
+                Labels:    []github.Label{{Name: "feature"}},
+            },
+            want: true,
+        },
+        {
+            name: "small regular PR",
+            pr: github.PR{
+                Title:     "Fix typo",
+                Additions: 1,
+                Deletions: 1,
+            },
+            want: false,
+        },
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            got := IsHighlight(tt.pr)
+            if got != tt.want {
+                t.Errorf("IsHighlight() = %v, want %v", got, tt.want)
+            }
+        })
+    }
+}
+
+func TestShouldExclude(t *testing.T) {
+    tests := []struct {
+        name string
+        pr   github.PR
+        want bool
+    }{
+        {
+            name: "too small",
+            pr: github.PR{
+                Title:     "Fix typo",
+                Additions: 1,
+                Deletions: 1,
+            },
+            want: true,
+        },
+        {
+            name: "chore without special labels",
+            pr: github.PR{
+                Title:     "chore: update deps",
+                Additions: 50,
+                Deletions: 30,
+            },
+            want: true,
+        },
+        {
+            name: "normal PR",
+            pr: github.PR{
+                Title:     "Add feature",
+                Additions: 50,
+                Deletions: 20,
+            },
+            want: false,
+        },
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            got := ShouldExclude(tt.pr)
+            if got != tt.want {
+                t.Errorf("ShouldExclude() = %v, want %v", got, tt.want)
+            }
+        })
+    }
+}
+#+end_src
+
+*** Checkpoint
+- [ ] Run: =go test ./internal/highlight -v=
+- [ ] All tests pass
+
+** STEP 12: Add Team Grouping
+*** Tasks
+Create =internal/highlight/grouper.go=:
+#+begin_src go
+package highlight
+
+import (
+    "regexp"
+    "sort"
+
+    "github.com/YOURUSERNAME/git-highlights/internal/github"
+)
+
+var ticketPrefixRegex = regexp.MustCompile(`^[\[]?([A-Z]+)-\d+`)
+
+// ExtractTeamPrefix extracts ticket prefix from PR title
+// Example: "BLO-645: Update feature" -> "BLO"
+func ExtractTeamPrefix(title string) string {
+    matches := ticketPrefixRegex.FindStringSubmatch(title)
+    if len(matches) < 2 {
+        return "OTHER"
+    }
+    return matches[1]
+}
+
+// GroupByTeam groups PRs by their team prefix
+func GroupByTeam(prs []github.PR) map[string][]github.PR {
+    groups := make(map[string][]github.PR)
+
+    for _, pr := range prs {
+        team := ExtractTeamPrefix(pr.Title)
+        groups[team] = append(groups[team], pr)
+    }
+
+    // Sort each team's PRs by size (largest first)
+    for team := range groups {
+        sort.Slice(groups[team], func(i, j int) bool {
+            return groups[team][i].TotalLines() > groups[team][j].TotalLines()
+        })
+    }
+
+    return groups
+}
+#+end_src
+
+*** Go Concepts to Learn
+- =regexp= package for regular expressions
+- =regexp.MustCompile()= — panic if invalid regex
+- =FindStringSubmatch()= — returns captured groups
+- =make()= to create maps
+- =map[string][]github.PR= — map of string to slice of PRs
+- =append()= to add to slices
+- =sort.Slice()= with custom comparison function
+- Anonymous functions (closures)
+
+*** Important: Regex Compilation
+- =MustCompile()= compiles regex at package init time
+- Use for regexes known at compile time
+- Use =Compile()= for dynamic patterns
+
+*** Checkpoint
+- [ ] Code compiles
+- [ ] Understand the regex pattern
+- [ ] Know what =sort.Slice()= does
+
+** STEP 13: Test Team Grouping
+*** Tasks
+Create =internal/highlight/grouper_test.go=:
+#+begin_src go
+package highlight
+
+import (
+    "testing"
+
+    "github.com/YOURUSERNAME/git-highlights/internal/github"
+)
+
+func TestExtractTeamPrefix(t *testing.T) {
+    tests := []struct {
+        title string
+        want  string
+    }{
+        {"BLO-645: Update feature", "BLO"},
+        {"[AIW-123] Fix bug", "AIW"},
+        {"DA-456: Add endpoint", "DA"},
+        {"No ticket prefix", "OTHER"},
+        {"INVALID format", "OTHER"},
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.title, func(t *testing.T) {
+            got := ExtractTeamPrefix(tt.title)
+            if got != tt.want {
+                t.Errorf("ExtractTeamPrefix(%q) = %q, want %q", tt.title, got, tt.want)
+            }
+        })
+    }
+}
+
+func TestGroupByTeam(t *testing.T) {
+    prs := []github.PR{
+        {Title: "BLO-1: Feature", Additions: 100, Deletions: 50},
+        {Title: "BLO-2: Fix", Additions: 10, Deletions: 5},
+        {Title: "AIW-1: Add AI", Additions: 200, Deletions: 100},
+    }
+
+    groups := GroupByTeam(prs)
+
+    // Check group counts
+    if len(groups["BLO"]) != 2 {
+        t.Errorf("expected 2 BLO PRs, got %d", len(groups["BLO"]))
+    }
+
+    if len(groups["AIW"]) != 1 {
+        t.Errorf("expected 1 AIW PR, got %d", len(groups["AIW"]))
+    }
+
+    // Check BLO PRs are sorted by size (largest first)
+    if groups["BLO"][0].Number != 1 { // 150 lines
+        t.Error("BLO PRs not sorted by size")
+    }
+}
+#+end_src
+
+*** Checkpoint
+- [ ] Run: =go test ./internal/highlight -v=
+- [ ] Tests pass
+
+* Phase 5: Markdown Generation
+** STEP 14: Create Markdown Package
+*** Tasks
+Create =internal/markdown/generator.go=:
+#+begin_src go
+package markdown
+
+import (
+    "bytes"
+    "fmt"
+    "strings"
+    "text/template"
+    "time"
+
+    "github.com/YOURUSERNAME/git-highlights/internal/github"
+)
+
+const reportTemplate = `# Weekly Highlights: {{.StartDate}} - {{.EndDate}}
+
+*{{.TotalPRs}} PRs merged by {{.UniqueContributors}} contributors this week*
+
+---
+
+## 🌟 Highlights
+{{range .Teams}}
+### {{.Emoji}} {{.Name}} ({{.Prefix}})
+{{range .PRs}}
+**{{.Title}}** by {{.Author.Login}}
+{{.Description}}
+[View PR #{{.Number}}](https://{{.RepoURL}}/pull/{{.Number}}) • {{.TotalLines}} lines
+{{end}}
+{{end}}
+---
+
+## 📊 Stats
+
+**Merges by Team:**
+{{range .TeamStats}}- {{.Emoji}} {{.Prefix}} ({{.Name}}): {{.Count}} PRs
+{{end}}
+**Top Contributors:**
+{{range .TopContributors}}{{.Rank}}. {{.Name}} - {{.Count}} PRs
+{{end}}
+**Change Volume:**
+- Total: {{.TotalAdditions}} additions, {{.TotalDeletions}} deletions
+- Average PR size: {{.AvgSize}} lines
+
+---
+
+*Generated with ` + "`/weekly-highlights`" + ` • Saved to docs/highlights/{{.EndDate}}.md*
+`
+
+var teamEmojis = map[string]string{
+    "BLO": "🧱",
+    "AIW": "🤖",
+    "DA":  "📊",
+    "BPP": "💰",
+    "INB": "📥",
+    "JS":  "🔧",
+    "INT": "🔗",
+}
+
+var teamNames = map[string]string{
+    "BLO": "Blocks",
+    "AIW": "AI",
+    "DA":  "Data",
+    "BPP": "Billing",
+    "INB": "Inbox",
+    "JS":  "JavaScript",
+    "INT": "Integrations",
+}
+
+// NOTE: These are hardcoded for v0.1 to keep things simple.
+// In v0.2, these will be loaded from a config file (~/.config/git-highlights/config.yaml)
+// so any team can customize their own mappings.
+
+// ReportData holds all data for the report template
+type ReportData struct {
+    StartDate          string
+    EndDate            string
+    RepoURL            string // e.g., "github.com/user/repo"
+    TotalPRs           int
+    UniqueContributors int
+    Teams              []TeamData
+    TeamStats          []TeamStat
+    TopContributors    []Contributor
+    TotalAdditions     int
+    TotalDeletions     int
+    AvgSize            int
+}
+
+type TeamData struct {
+    Emoji  string
+    Name   string
+    Prefix string
+    PRs    []PRData
+}
+
+type PRData struct {
+    github.PR
+    Description string
+}
+
+type TeamStat struct {
+    Emoji  string
+    Prefix string
+    Name   string
+    Count  int
+}
+
+type Contributor struct {
+    Rank  int
+    Name  string
+    Count int
+}
+
+// Generate creates markdown report
+func Generate(data ReportData) (string, error) {
+    tmpl, err := template.New("report").Parse(reportTemplate)
+    if err != nil {
+        return "", fmt.Errorf("failed to parse template: %w", err)
+    }
+
+    var buf bytes.Buffer
+    if err := tmpl.Execute(&buf, data); err != nil {
+        return "", fmt.Errorf("failed to execute template: %w", err)
+    }
+
+    return buf.String(), nil
+}
+
+// GetTeamEmoji returns emoji for team prefix
+func GetTeamEmoji(prefix string) string {
+    if emoji, ok := teamEmojis[prefix]; ok {
+        return emoji
+    }
+    return "🛠️" // default
+}
+
+// GetTeamName returns full name for team prefix
+func GetTeamName(prefix string) string {
+    if name, ok := teamNames[prefix]; ok {
+        return name
+    }
+    return "Other"
+}
+
+// ExtractDescription gets first sentence from PR body
+func ExtractDescription(body string) string {
+    if body == "" {
+        return "No description provided."
+    }
+
+    // Get first 200 chars
+    if len(body) > 200 {
+        body = body[:200] + "..."
+    }
+
+    // Get first sentence (naive approach)
+    if idx := strings.Index(body, "."); idx != -1 {
+        body = body[:idx+1]
+    }
+
+    return strings.TrimSpace(body)
+}
+#+end_src
+
+*** Go Concepts to Learn
+- =text/template= package
+- Template syntax: ={{.Field}}=, ={{range}}=, ={{end}}=
+- Template data binding
+- =template.Parse()= and =Execute()=
+- Package-level variables (=var teamEmojis=)
+- Map literals with initialization
+- =map[string]string= type
+- Map lookup with =ok= idiom: =value, ok := map[key]=
+
+*** Template Concepts
+- ={{.Field}}= — access field
+- ={{range .Slice}}...{{end}}= — loop over slice
+- Dot (=.=) — current context
+- Nested dots: ={{.Author.Login}}=
+
+*** Checkpoint
+- [ ] Code compiles
+- [ ] Understand template syntax
+- [ ] Know how to access nested fields in templates
+
+** STEP 15: Test Markdown Generation
+*** Tasks
+Create =internal/markdown/generator_test.go=:
+#+begin_src go
+package markdown
+
+import (
+    "strings"
+    "testing"
+
+    "github.com/YOURUSERNAME/git-highlights/internal/github"
+)
+
+func TestGenerate(t *testing.T) {
+    data := ReportData{
+        StartDate:          "2026-01-27",
+        EndDate:            "2026-02-03",
+        TotalPRs:           2,
+        UniqueContributors: 1,
+        Teams: []TeamData{
+            {
+                Emoji:  "🤖",
+                Name:   "AI",
+                Prefix: "AIW",
+                PRs: []PRData{
+                    {
+                        PR: github.PR{
+                            Number:    123,
+                            Title:     "AIW-123: Add feature",
+                            Author:    github.Author{Login: "testuser"},
+                            Additions: 100,
+                            Deletions: 50,
+                        },
+                        Description: "Test description.",
+                    },
+                },
+            },
+        },
+        TeamStats: []TeamStat{
+            {Emoji: "🤖", Prefix: "AIW", Name: "AI", Count: 2},
+        },
+        TopContributors: []Contributor{
+            {Rank: 1, Name: "testuser", Count: 2},
+        },
+        TotalAdditions: 100,
+        TotalDeletions: 50,
+        AvgSize:        75,
+    }
+
+    output, err := Generate(data)
+    if err != nil {
+        t.Fatalf("Generate() error = %v", err)
+    }
+
+    // Verify output contains expected elements
+    checks := []string{
+        "Weekly Highlights",
+        "2026-01-27",
+        "2026-02-03",
+        "AIW-123: Add feature",
+        "testuser",
+        "2 PRs merged",
+    }
+
+    for _, check := range checks {
+        if !strings.Contains(output, check) {
+            t.Errorf("output missing %q", check)
+        }
+    }
+}
+
+func TestExtractDescription(t *testing.T) {
+    tests := []struct {
+        body string
+        want string
+    }{
+        {"First sentence. Second sentence.", "First sentence."},
+        {"", "No description provided."},
+        {strings.Repeat("a", 300), strings.Repeat("a", 200) + "..."},
+    }
+
+    for _, tt := range tests {
+        got := ExtractDescription(tt.body)
+        if got != tt.want {
+            t.Errorf("ExtractDescription() = %q, want %q", got, tt.want)
+        }
+    }
+}
+#+end_src
+
+*** Checkpoint
+- [ ] Run: =go test ./internal/markdown -v=
+- [ ] Tests pass
+- [ ] Look at generated output in test logs
+
+* Phase 6: Wire It All Together
+** STEP 16: Implement Generate Command
+*** Tasks
+Update =cmd/git-highlights/generate.go=:
+#+begin_src go
+package main
+
+import (
+    "fmt"
+    "os"
+    "path/filepath"
+    "sort"
+    "time"
+
+    "github.com/spf13/cobra"
+
+    "github.com/YOURUSERNAME/git-highlights/internal/git"
+    "github.com/YOURUSERNAME/git-highlights/internal/github"
+    "github.com/YOURUSERNAME/git-highlights/internal/highlight"
+    "github.com/YOURUSERNAME/git-highlights/internal/markdown"
+)
+
+var (
+    days int
+)
+
+var generateCmd = &cobra.Command{
+    Use:   "generate",
+    Short: "Generate highlights for the past week",
+    RunE:  runGenerate,
+}
+
+func init() {
+    generateCmd.Flags().IntVar(&days, "days", 7, "Number of days to look back")
+    rootCmd.AddCommand(generateCmd)
+}
+
+func runGenerate(cmd *cobra.Command, args []string) error {
+    // Calculate date range
+    endDate := time.Now()
+    startDate := endDate.AddDate(0, 0, -days)
+
+    fmt.Printf("Generating highlights from %s to %s...\n",
+        startDate.Format("2006-01-02"),
+        endDate.Format("2006-01-02"))
+
+    // Detect repository URL (makes it work with any repo!)
+    repoURL, err := git.GetRepoURL()
+    if err != nil {
+        return fmt.Errorf("failed to detect repo URL: %w", err)
+    }
+    fmt.Printf("Repository: %s\n", repoURL)
+
+    // Fetch PRs from GitHub
+    prs, err := github.GetMergedPRs(startDate)
+    if err != nil {
+        return fmt.Errorf("failed to fetch PRs: %w", err)
+    }
+
+    fmt.Printf("Found %d merged PRs\n", len(prs))
+
+    // Filter to highlights
+    var highlights []github.PR
+    for _, pr := range prs {
+        if highlight.ShouldExclude(pr) {
+            continue
+        }
+        if highlight.IsHighlight(pr) {
+            highlights = append(highlights, pr)
+        }
+    }
+
+    fmt.Printf("Identified %d highlights\n", len(highlights))
+
+    // Group by team
+    groups := highlight.GroupByTeam(highlights)
+
+    // Build team data
+    var teams []markdown.TeamData
+    for prefix, teamPRs := range groups {
+        var prData []markdown.PRData
+        for _, pr := range teamPRs {
+            prData = append(prData, markdown.PRData{
+                PR:          pr,
+                Description: markdown.ExtractDescription(pr.Body),
+            })
+        }
+
+        teams = append(teams, markdown.TeamData{
+            Emoji:  markdown.GetTeamEmoji(prefix),
+            Name:   markdown.GetTeamName(prefix),
+            Prefix: prefix,
+            PRs:    prData,
+        })
+    }
+
+    // Sort teams by PR count (descending)
+    sort.Slice(teams, func(i, j int) bool {
+        return len(teams[i].PRs) > len(teams[j].PRs)
+    })
+
+    // Calculate stats
+    contributors := make(map[string]int)
+    totalAdditions := 0
+    totalDeletions := 0
+
+    for _, pr := range prs {
+        contributors[pr.Author.Login]++
+        totalAdditions += pr.Additions
+        totalDeletions += pr.Deletions
+    }
+
+    // Build team stats
+    var teamStats []markdown.TeamStat
+    teamCounts := make(map[string]int)
+    for _, pr := range prs {
+        prefix := highlight.ExtractTeamPrefix(pr.Title)
+        teamCounts[prefix]++
+    }
+
+    for prefix, count := range teamCounts {
+        teamStats = append(teamStats, markdown.TeamStat{
+            Emoji:  markdown.GetTeamEmoji(prefix),
+            Prefix: prefix,
+            Name:   markdown.GetTeamName(prefix),
+            Count:  count,
+        })
+    }
+
+    // Sort team stats by count
+    sort.Slice(teamStats, func(i, j int) bool {
+        return teamStats[i].Count > teamStats[j].Count
+    })
+
+    // Build top contributors
+    type contribPair struct {
+        name  string
+        count int
+    }
+    var contribList []contribPair
+    for name, count := range contributors {
+        contribList = append(contribList, contribPair{name, count})
+    }
+    sort.Slice(contribList, func(i, j int) bool {
+        return contribList[i].count > contribList[j].count
+    })
+
+    var topContributors []markdown.Contributor
+    for i, c := range contribList {
+        if i >= 5 {
+            break
+        }
+        topContributors = append(topContributors, markdown.Contributor{
+            Rank:  i + 1,
+            Name:  c.name,
+            Count: c.count,
+        })
+    }
+
+    // Calculate average size
+    avgSize := 0
+    if len(prs) > 0 {
+        avgSize = (totalAdditions + totalDeletions) / len(prs)
+    }
+
+    // Build report data
+    reportData := markdown.ReportData{
+        StartDate:          startDate.Format("2006-01-02"),
+        EndDate:            endDate.Format("2006-01-02"),
+        RepoURL:            repoURL, // Auto-detected - works with any repo!
+        TotalPRs:           len(prs),
+        UniqueContributors: len(contributors),
+        Teams:              teams,
+        TeamStats:          teamStats,
+        TopContributors:    topContributors,
+        TotalAdditions:     totalAdditions,
+        TotalDeletions:     totalDeletions,
+        AvgSize:            avgSize,
+    }
+
+    // Generate markdown
+    output, err := markdown.Generate(reportData)
+    if err != nil {
+        return fmt.Errorf("failed to generate markdown: %w", err)
+    }
+
+    // Print to stdout
+    fmt.Println()
+    fmt.Println(output)
+
+    // Save to file
+    outputDir := "docs/highlights"
+    if err := os.MkdirAll(outputDir, 0755); err != nil {
+        return fmt.Errorf("failed to create output directory: %w", err)
+    }
+
+    outputFile := filepath.Join(outputDir, endDate.Format("2006-01-02")+".md")
+    if err := os.WriteFile(outputFile, []byte(output), 0644); err != nil {
+        return fmt.Errorf("failed to write file: %w", err)
+    }
+
+    fmt.Printf("\n✅ Saved to %s\n", outputFile)
+
+    return nil
+}
+#+end_src
+
+*** Go Concepts to Learn
+- Command-line flags with Cobra: =Flags().IntVar()=
+- =make(map[string]int)= — create map with type
+- Map increment: =map[key]++= (initializes to 0 if missing)
+- Anonymous structs for temporary data: =type contribPair struct=
+- Multiple sorting operations
+- =os.MkdirAll()= — create directory and parents
+- File permissions: =0755= for dirs, =0644= for files
+- =os.WriteFile()= for writing files
+
+*** Checkpoint
+- [ ] Code compiles
+- [ ] Run =go mod tidy= to update dependencies
+
+** STEP 17: Test Full Pipeline
+*** Tasks
+- [ ] Navigate to your hs-app-ui repo directory
+- [ ] Run: =go build -o git-highlights ./cmd/git-highlights=
+- [ ] Run: =./git-highlights generate=
+- [ ] Verify output:
+  - [ ] PRs are fetched
+  - [ ] Highlights are identified
+  - [ ] Markdown is printed to stdout
+  - [ ] File is saved to =docs/highlights/YYYY-MM-DD.md=
+- [ ] Open the generated file and verify formatting
+
+*** Troubleshooting
+If =gh pr list= fails:
+#+begin_src bash
+gh auth login
+#+end_src
+
+If no PRs found:
+- Check you're in a git repo
+- Try =--days 30= for wider range
+- Verify =gh= CLI is working: =gh pr list --limit 5=
+
+*** Checkpoint
+- [ ] End-to-end test works
+- [ ] Output looks good
+- [ ] File is created successfully
+
+* Phase 7: Polish & Testing
+** STEP 18: Add Integration Test
+*** Tasks
+Create =cmd/git-highlights/generate_test.go=:
+#+begin_src go
+package main
+
+import (
+    "os"
+    "path/filepath"
+    "testing"
+)
+
+func TestGenerateCommand_CreatesFile(t *testing.T) {
+    // This is an integration test
+    // Skip if not in a git repo or gh not configured
+
+    if _, err := os.Stat(".git"); os.IsNotExist(err) {
+        t.Skip("not in a git repository")
+    }
+
+    // Could test by running the command and checking output
+    // For now, just verify the runGenerate function signature exists
+    _ = runGenerate
+}
+#+end_src
+
+*** Go Concepts to Learn
+- Integration test patterns
+- =t.Skip()= for conditional tests
+- =os.Stat()= to check file existence
+
+** STEP 19: Add More Flags
+*** Tasks
+Add optional flags to =generate.go=:
+#+begin_src go
+var (
+    days   int
+    team   string
+    quiet  bool
+)
+
+func init() {
+    generateCmd.Flags().IntVar(&days, "days", 7, "Number of days to look back")
+    generateCmd.Flags().StringVar(&team, "team", "", "Filter by team prefix (e.g., AIW)")
+    generateCmd.Flags().BoolVar(&quiet, "quiet", false, "Don't print to stdout")
+    rootCmd.AddCommand(generateCmd)
+}
+#+end_src
+
+Then in =runGenerate()=, add filtering:
+#+begin_src go
+// After grouping by team
+if team != "" {
+    filtered := make(map[string][]github.PR)
+    if teamPRs, ok := groups[team]; ok {
+        filtered[team] = teamPRs
+        groups = filtered
+    } else {
+        return fmt.Errorf("no PRs found for team %q", team)
+    }
+}
+
+// Before printing
+if !quiet {
+    fmt.Println()
+    fmt.Println(output)
+}
+#+end_src
+
+*** Checkpoint
+- [ ] Rebuild: =go build -o git-highlights ./cmd/git-highlights=
+- [ ] Test: =./git-highlights generate --team AIW=
+- [ ] Test: =./git-highlights generate --days 14=
+- [ ] Test: =./git-highlights generate --quiet=
+
+** STEP 20: Add Version Command
+*** Tasks
+Create =cmd/git-highlights/version.go=:
+#+begin_src go
+package main
+
+import (
+    "fmt"
+
+    "github.com/spf13/cobra"
+)
+
+const version = "0.1.0"
+
+var versionCmd = &cobra.Command{
+    Use:   "version",
+    Short: "Print version information",
+    Run: func(cmd *cobra.Command, args []string) {
+        fmt.Printf("git-highlights v%s\n", version)
+    },
+}
+
+func init() {
+    rootCmd.AddCommand(versionCmd)
+}
+#+end_src
+
+*** Checkpoint
+- [ ] Build: =go build -o git-highlights ./cmd/git-highlights=
+- [ ] Run: =./git-highlights version=
+
+* Phase 8: Documentation & Distribution
+** STEP 21: Write README
+*** Tasks
+Create =README.md=:
+#+begin_src markdown
+# git-highlights
+
+A CLI tool for generating weekly engineering highlights from Git/GitHub data.
+
+## Installation
+
+### From Source
+
+```bash
+go install github.com/YOURUSERNAME/git-highlights/cmd/git-highlights@latest
+```
+
+### Binary Release
+
+Download from GitHub releases (coming soon).
+
+## Usage
+
+### Generate Highlights
+
+```bash
+# Past 7 days (default)
+git-highlights generate
+
+# Past 14 days
+git-highlights generate --days 14
+
+# Filter by team
+git-highlights generate --team AIW
+
+# Quiet mode (only save file)
+git-highlights generate --quiet
+```
+
+### Output
+
+Generates a markdown file at `docs/highlights/YYYY-MM-DD.md` with:
+- 🌟 Highlights by team
+- 📊 Statistics (merges by team, top contributors, change volume)
+- Meeting-ready format
+
+## Requirements
+
+- Git repository
+- GitHub CLI (`gh`) authenticated
+- Go 1.21+ (for building from source)
+
+## How It Works
+
+1. Fetches merged PRs via `gh pr list`
+2. Identifies highlights based on:
+   - Size (150+ lines)
+   - Labels (feature, breaking, security)
+   - Keywords in title
+3. Groups by team prefix (BLO, AIW, DA, etc.)
+4. Generates formatted markdown
+
+## Development
+
+```bash
+# Run tests
+go test ./...
+
+# Build
+go build -o git-highlights ./cmd/git-highlights
+
+# Install locally
+go install ./cmd/git-highlights
+```
+
+## Learning Project
+
+This was built as a Go learning project. See `plan.org` for the step-by-step build guide.
+#+end_src
+
+*** Checkpoint
+- [ ] README is clear
+- [ ] Installation instructions work
+
+** STEP 22: Build for Multiple Platforms
+*** Tasks
+Create build script =build.sh=:
+#+begin_src bash
+#!/bin/bash
+set -e
+
+VERSION="0.1.0"
+OUTPUT_DIR="dist"
+
+rm -rf $OUTPUT_DIR
+mkdir -p $OUTPUT_DIR
+
+# macOS ARM64
+GOOS=darwin GOARCH=arm64 go build -o $OUTPUT_DIR/git-highlights-darwin-arm64 ./cmd/git-highlights
+
+# macOS AMD64
+GOOS=darwin GOARCH=amd64 go build -o $OUTPUT_DIR/git-highlights-darwin-amd64 ./cmd/git-highlights
+
+# Linux AMD64
+GOOS=linux GOARCH=amd64 go build -o $OUTPUT_DIR/git-highlights-linux-amd64 ./cmd/git-highlights
+
+echo "Built binaries in $OUTPUT_DIR/"
+ls -lh $OUTPUT_DIR/
+#+end_src
+
+*** Go Concepts to Learn
+- =GOOS= and =GOARCH= environment variables
+- Cross-compilation in Go
+- Build output targeting
+
+*** Checkpoint
+- [ ] Make executable: =chmod +x build.sh=
+- [ ] Run: =./build.sh=
+- [ ] Verify binaries created
+
+* Learning Checkpoints
+** Go Fundamentals
+- [ ] Understand =cmd/= and =internal/= project structure
+- [ ] Comfortable with modules and imports
+- [ ] Can use =os/exec= to shell out to commands
+- [ ] Know how to parse JSON with struct tags
+- [ ] Understand methods vs functions
+- [ ] Can work with maps and slices
+- [ ] Comfortable with error handling and wrapping
+
+** Standard Library
+- [ ] =os/exec= for running external commands
+- [ ] =encoding/json= for JSON parsing
+- [ ] =time= package for dates and arithmetic
+- [ ] =text/template= for markdown generation
+- [ ] =regexp= for pattern matching
+- [ ] =os= for file I/O
+- [ ] =sort= for custom sorting
+
+** CLI Development
+- [ ] Using Cobra for command structure
+- [ ] Adding flags and subcommands
+- [ ] Error handling in CLI apps
+- [ ] File output and stdout
+
+** Real-World Skills
+- [ ] Integrating with external tools (git, gh)
+- [ ] Processing and transforming data
+- [ ] Generating formatted output
+- [ ] Building installable binaries
+- [ ] Cross-platform builds
+
+* Next Steps (Post v0.1)
+After using v0.1 for a few weeks:
+
+** Potential v0.2 Features
+- [ ] =--format json= for programmatic use
+- [ ] =git-highlights stats= command for quick stats
+- [ ] Config file for team mappings (=~/.config/git-highlights/config.yaml=)
+- [ ] Better caching (avoid re-fetching PRs)
+- [ ] =--since= and =--until= date flags
+- [ ] Multiple repo support
+- [ ] Color output in terminal
+
+** Learning Opportunities
+- Add =viper= for configuration management
+- Try =lipgloss= for terminal styling
+- Implement =--format= with interfaces
+- Add GitHub API client (instead of =gh= CLI)
+- Set up GitHub Actions for releases
+- Learn =goreleaser= for automated builds
+
+* Resources
+** Official Documentation
+- Go by Example: https://gobyexample.com/
+- Cobra docs: https://cobra.dev/
+- Standard library: https://pkg.go.dev/std
+
+** Recommended Reading
+- Effective Go: https://go.dev/doc/effective_go
+- Go blog on error handling
+- Cobra user guide
+
+** When You Get Stuck
+- Read error messages carefully (Go errors are usually clear)
+- Use =go doc= command: =go doc os/exec.Command=
+- Print variables with =fmt.Printf("%+v\n", variable)=
+- Add =fmt.Println()= debug statements liberally
+
+* Success Metrics
+You'll know you've succeeded when:
+- [ ] Can generate highlights in any hs-app-ui directory
+- [ ] Output is useful for guild meetings
+- [ ] Can explain how each package works
+- [ ] Comfortable adding new features
+- [ ] Tests give you confidence to refactor
+- [ ] Team members are using it!
+
+* Key Design Decisions
+** Why Cobra?
+Cobra is the standard for Go CLIs (used by kubectl, gh, hugo). It provides:
+- Automatic help generation
+- Subcommand structure
+- Flag parsing
+- Better than using =flag= package directly
+
+** Why Shell Out to =gh=?
+Using =gh pr list= is simpler than:
+- GitHub API authentication
+- Pagination
+- Rate limiting
+- JSON parsing is same either way
+
+Later, you could add direct API calls as an optimization.
+
+** Why =text/template=?
+- Standard library (no dependencies)
+- Good enough for markdown
+- Easy to test
+- Could switch to =html/template= for HTML output later
+
+** Package Organization
+- =cmd/= — executables (main packages)
+- =internal/git= — Git operations
+- =internal/github= — GitHub data fetching
+- =internal/highlight= — Business logic (detection, grouping)
+- =internal/markdown= — Output formatting
+
+This separation makes testing easier and code more reusable.
+
+Good luck! This is a real tool you'll actually use, which makes learning stick. 🚀
+
+Take your time, understand each step, and enjoy the process.
