@@ -274,10 +274,10 @@ Let's build it!
 * Phase 1: Project Setup & Hello World
 ** STEP 1: Initialize Project Structure
 *** Tasks
-- [ ] Create project directory: =mkdir -p ~/Gigalope/git-highlights=
-- [ ] =cd ~/Gigalope/git-highlights=
-- [ ] Initialize module: =go mod init github.com/YOURUSERNAME/git-highlights=
-- [ ] Create directory structure:
+- [X] Create project directory: =mkdir -p ~/Gigalope/git-highlights=
+- [X] =cd ~/Gigalope/git-highlights=
+- [X] Initialize module: =go mod init github.com/YOURUSERNAME/git-highlights=
+- [X] Create directory structure:
 #+begin_src bash
 mkdir -p cmd/git-highlights
 mkdir -p internal/{git,github,highlight,markdown}
@@ -289,8 +289,8 @@ mkdir -p internal/{git,github,highlight,markdown}
 - Module naming with GitHub path
 
 *** Checkpoint
-- [ ] =go.mod= exists
-- [ ] Directory structure matches above
+- [X] =go.mod= exists
+- [X] Directory structure matches above
 
 ** STEP 2: Create Hello World with Cobra
 *** Tasks
